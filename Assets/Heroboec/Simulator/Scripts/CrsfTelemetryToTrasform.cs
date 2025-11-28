@@ -12,6 +12,6 @@ public class CrsfTelemetryToTrasform : MonoBehaviour
 
     private void TelemetryReceived(CrsfTelemetryData data)
     {
-        transform.localEulerAngles = new Vector3(data.Pitch, data.Yaw, -data.Roll);
+        transform.localEulerAngles = new Vector3(data.Angles.Pitch, data.Angles.Yaw, -data.Angles.Roll);
     }
 }
