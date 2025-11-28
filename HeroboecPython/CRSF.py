@@ -1,23 +1,57 @@
-# crsf_controller.py
 import serial
 import threading
 import time
-from typing import Callable, Optional
-import math
+import struct
+from dataclasses import dataclass, field
+from typing import List, Callable, Optional, Dict, Any
 
+# --- Data Classes (Structures) ---
+
+@dataclass
+class CrsfAnglesData:
+    pitch: float = 0.0
+    roll: float = 0.0
+    yaw: float = 0.0
+
+@dataclass
+class CrsfGpsData:
+    latitude: float = 0.0
+    longitude: float = 0.0
+    ground_speed: float = 0.0  # km/h
+    ground_course: float = 0.0 # degrees
+    altitude: float = 0.0      # meters
+    satellites: int = 0
+
+@dataclass
+class CrsfBatteryData:
+    voltage: float = 0.0       # Volts
+    current: float = 0.0       # Amps
+    capacity_mah: int = 0
+    remaining_percent: int = 0
+
+@dataclass
+class CrsfVSpeedData:
+    vertical_speed: float = 0.0 # m/s
+
+@dataclass
+class CrsfFlightModeData:
+    mode: str = ""
+
+@dataclass
 class CrsfTelemetryData:
-    """Класс данных телеметрии"""
-    def __init__(self):
-        self.pitch: float = 0.0  # градусы
-        self.roll: float = 0.0   # градусы
-        self.yaw: float = 0.0    # градусы
-    
-    def __str__(self):
-        return f"Pitch={self.pitch:.1f}° Yaw={self.yaw:.1f}° Roll={self.roll:.1f}°"
+    angles: CrsfAnglesData = field(default_factory=CrsfAnglesData)
+    gps: CrsfGpsData = field(default_factory=CrsfGpsData)
+    battery: CrsfBatteryData = field(default_factory=CrsfBatteryData)
+    v_speed: CrsfVSpeedData = field(default_factory=CrsfVSpeedData)
+    flight_mode: CrsfFlightModeData = field(default_factory=CrsfFlightModeData)
 
+    def __str__(self):
+        return (f"Tlm(Pitch={self.angles.pitch:.1f}, Roll={self.angles.roll:.1f}, "
+                f"Bat={self.battery.voltage:.1f}V, Mode={self.flight_mode.mode})")
+
+# --- CRC Calculator ---
 
 class CRC8Calculator:
-    """Калькулятор CRC8 для CRSF"""
     def __init__(self, polynomial: int = 0xD5):
         self.polynomial = polynomial
         self._table = self._generate_table()
@@ -34,8 +68,7 @@ class CRC8Calculator:
             table.append(crc)
         return table
     
-    def checksum(self, data: bytes, start: int = 0, length: Optional[int] = None) -> int:
-        """Вычисление CRC8"""
+    def checksum(self, data: bytearray, start: int = 0, length: Optional[int] = None) -> int:
         if length is None:
             length = len(data) - start
         
@@ -44,98 +77,101 @@ class CRC8Calculator:
             crc = self._table[crc ^ data[i]]
         return crc
 
+# --- Main Controller Class ---
 
 class CrsfController:
-    """Контроллер для работы с CRSF протоколом"""
+    # Constants
+    CRSF_SYNC_BYTE = 0xC8
     
-    # Константы CRSF
-    CRSF_FRAMETYPE_RC_CHANNELS = 0x16
-    CRSF_FRAMETYPE_ATTITUDE = 0x1E
-    CRSF_ADDR_MODULE = 0xC8
+    # Frame Types
+    FRAME_GPS = 0x02
+    FRAME_VSPEED = 0x07
+    FRAME_BATTERY = 0x08
+    FRAME_RC_CHANNELS = 0x16
+    FRAME_ATTITUDE = 0x1E
+    FRAME_FLIGHT_MODE = 0x21
+
+    # Scaling
     CRSF_MIN = 172
     CRSF_MAX = 1811
-    
+
     def __init__(self):
         self.serial_port: Optional[serial.Serial] = None
-        self.send_thread: Optional[threading.Thread] = None
-        self.receive_thread: Optional[threading.Thread] = None
         self.is_running: bool = False
         
-        self.channels = [0.0] * 16  # 16 каналов
-        self.channel_lock = threading.Lock()
+        # Threads
+        self.send_thread: Optional[threading.Thread] = None
+        self.receive_thread: Optional[threading.Thread] = None
         
+        # Channels (0-15) range -1.0 to 1.0
+        self.channels: List[float] = [0.0] * 16
+        self._channel_lock = threading.Lock()
+        
+        # Telemetry Storage
         self.telemetry = CrsfTelemetryData()
-        self._telemetry_callbacks = []
         
-        self.send_rate: int = 50
+        # Event Callbacks (Subscribers)
+        # Format: {'event_name': [func1, func2]}
+        self._callbacks: Dict[str, List[Callable[[CrsfTelemetryData], None]]] = {
+            'all': [],        # Called on ANY update
+            'angles': [],
+            'gps': [],
+            'battery': [],
+            'vspeed': [],
+            'flight_mode': []
+        }
+
         self.crc_calculator = CRC8Calculator(0xD5)
+        self.send_rate = 50  # Hz
         
-        # Статистика
-        self.data_sent: int = 0
-        self.data_received: int = 0
-        self.bytes_received: int = 0
-        
-        self._last_telemetry_time: float = 0.0
-        self.telemetry_fps: float = 0.0
-    
-    def connect(self, port: str, baud_rate: int, send_rate: int = 50):
-        """
-        Подключение к CRSF устройству
-        
-        Args:
-            port: COM порт (например, 'COM5' или '/dev/ttyUSB0')
-            baud_rate: Скорость (например, 420000)
-            send_rate: Частота отправки каналов в Гц
-        """
+        # Stats
+        self.stats_bytes_received = 0
+        self.stats_packets_sent = 0
+
+    def connect(self, port: str, baud_rate: int = 420000, send_rate: int = 50):
+        """Подключение к порту и запуск потоков."""
         if self.is_running:
             print("CRSF уже подключен.")
             return
-        
+
         try:
-            # Инициализация каналов в нейтральное положение
-            for i in range(len(self.channels)):
-                self.channels[i] = 0.0
+            self.channels = [0.0] * 16
+            self.send_rate = send_rate
             
-            # Открытие порта
             self.serial_port = serial.Serial(
                 port=port,
                 baudrate=baud_rate,
-                bytesize=serial.EIGHTBITS,
                 parity=serial.PARITY_NONE,
                 stopbits=serial.STOPBITS_ONE,
+                bytesize=serial.EIGHTBITS,
                 timeout=0.5,
                 write_timeout=0.1
             )
             
-            self.send_rate = send_rate
             self.is_running = True
             
-            # Запуск потока отправки
+            # Запуск потоков
             self.send_thread = threading.Thread(target=self._send_loop, daemon=True)
             self.send_thread.start()
             
-            # Запуск потока приема
             self.receive_thread = threading.Thread(target=self._receive_loop, daemon=True)
             self.receive_thread.start()
             
-            print(f"CRSF подключен к {port} на скорости {baud_rate} baud")
-        
+            print(f"CRSF подключен к {port} ({baud_rate} baud)")
+            
         except Exception as e:
-            print(f"Ошибка подключения CRSF: {e}")
+            print(f"CRSF Ошибка подключения: {e}")
             self.disconnect()
-    
+
     def disconnect(self):
-        """Отключение от CRSF устройства"""
+        """Остановка потоков и закрытие порта."""
         self.is_running = False
         
-        # Ожидание завершения потоков
         if self.send_thread and self.send_thread.is_alive():
             self.send_thread.join(timeout=1.0)
-        
         if self.receive_thread and self.receive_thread.is_alive():
             self.receive_thread.join(timeout=1.0)
-        
-        # Закрытие порта
+            
         if self.serial_port and self.serial_port.is_open:
             try:
                 self.serial_port.close()
@@ -144,205 +180,232 @@ class CrsfController:
         
         self.serial_port = None
         print("CRSF отключен")
-    
-    def set_channel(self, channel_num: int, value: float):
+
+    def set_channel(self, channel_idx: int, value: float):
+        """Установка канала (0-15), значение от -1.0 до 1.0."""
+        if 0 <= channel_idx < 16:
+            with self._channel_lock:
+                # Clamp value
+                self.channels[channel_idx] = max(-1.0, min(1.0, value))
+
+    def get_telemetry(self) -> CrsfTelemetryData:
+        """Возвращает текущий слепок данных телеметрии."""
+        return self.telemetry
+
+    # --- Event System ---
+
+    def subscribe(self, event_type: str, callback: Callable[[CrsfTelemetryData], None]):
         """
-        Установить значение канала
-        
-        Args:
-            channel_num: Номер канала (0-15)
-            value: Значение от -1 до 1
+        Подписка на события.
+        event_type: 'angles', 'gps', 'battery', 'vspeed', 'flight_mode', или 'all'
         """
-        if channel_num < 0 or channel_num >= len(self.channels):
-            print(f"Неверный номер канала: {channel_num}")
-            return
-        
-        with self.channel_lock:
-            self.channels[channel_num] = max(-1.0, min(1.0, value))
-    
-    def get_channel(self, channel_num: int) -> float:
-        """
-        Получить значение канала
-        
-        Args:
-            channel_num: Номер канала (0-15)
-            
-        Returns:
-            Значение от -1 до 1
-        """
-        if channel_num < 0 or channel_num >= len(self.channels):
-            print(f"Неверный номер канала: {channel_num}")
-            return 0.0
-        
-        with self.channel_lock:
-            return self.channels[channel_num]
-    
-    def add_telemetry_callback(self, callback: Callable[[CrsfTelemetryData], None]):
-        """
-        Добавить callback для получения телеметрии
-        
-        Args:
-            callback: Функция, которая будет вызвана при получении телеметрии
-        """
-        if callback not in self._telemetry_callbacks:
-            self._telemetry_callbacks.append(callback)
-    
-    def remove_telemetry_callback(self, callback: Callable[[CrsfTelemetryData], None]):
-        """Удалить callback для телеметрии"""
-        if callback in self._telemetry_callbacks:
-            self._telemetry_callbacks.remove(callback)
-    
-    def _send_loop(self):
-        """Поток отправки каналов"""
-        delay_sec = 1.0 / self.send_rate
-        
-        while self.is_running:
+        if event_type in self._callbacks:
+            if callback not in self._callbacks[event_type]:
+                self._callbacks[event_type].append(callback)
+        else:
+            print(f"Неизвестный тип события: {event_type}")
+
+    def _trigger_event(self, event_type: str):
+        # Call specific subscribers
+        for cb in self._callbacks.get(event_type, []):
             try:
-                if self.serial_port and self.serial_port.is_open:
-                    self._send_crsf_channels()
-                
-                time.sleep(delay_sec)
-            
+                cb(self.telemetry)
             except Exception as e:
-                print(f"Ошибка отправки CRSF: {e}")
-                time.sleep(delay_sec)
-    
-    def _receive_loop(self):
-        """Поток приема телеметрии"""
-        frame = bytearray(255)
+                print(f"Error in callback ({event_type}): {e}")
         
-        while self.is_running:
+        # Call 'all' subscribers
+        for cb in self._callbacks['all']:
             try:
-                if self.serial_port and self.serial_port.is_open:
-                    # Ждем sync byte
-                    if self.serial_port.in_waiting >= 2:
-                        sync_byte = self.serial_port.read(1)[0]
-                        self.bytes_received += 1
-                        
-                        if sync_byte == 0xC8:
-                            length = self.serial_port.read(1)[0]
-                            self.bytes_received += 1
-                            
-                            if length > 0:
-                                # Ждем полного пакета
-                                while self.serial_port.in_waiting < length:
-                                    time.sleep(0.001)
-                                
-                                frame_data = self.serial_port.read(length)
-                                self.bytes_received += length
-                                
-                                # Обработка пакета
-                                self._process_received_frame(frame_data, length)
-                else:
-                    time.sleep(0.005)
-            
-            except serial.SerialTimeoutException:
+                cb(self.telemetry)
+            except Exception:
                 pass
-            except Exception as e:
-                print(f"Ошибка приема CRSF: {e}")
-    
-    def _process_received_frame(self, frame: bytes, length: int):
-        """Обработка полученного пакета"""
-        # Проверка CRC
-        if not self._check_frame_crc8(frame, length):
-            print("Wrong CRC8")
+
+    # --- Processing Logic ---
+
+    def _process_frame(self, frame: bytearray, length: int):
+        if not self._check_crc(frame, length):
+            # print("CRC Error")
             return
-        
+
         frame_type = frame[0]
+        payload = frame[1:length-1] # исключаем тип (уже в frame_type) и CRC (последний байт)
+        # В C# коде frame включал Type в index 0. Здесь frame передается начиная с Type.
+        # frame[0] = Type, frame[1...] = Payload, frame[len-1] = CRC.
         
-        # Телеметрия углов (Attitude)
-        if frame_type == self.CRSF_FRAMETYPE_ATTITUDE:
-            if length >= 7:
-                a1 = (frame[1] << 8) | frame[2]
-                a2 = (frame[3] << 8) | frame[4]
-                a3 = (frame[5] << 8) | frame[6]
-                
-                self.telemetry.pitch = (360.0 * a1) / 65536.0
-                self.telemetry.yaw = (360.0 * a3) / 65536.0
-                self.telemetry.roll = (360.0 * a2) / 65536.0
-                
-                # Вычисление FPS телеметрии
-                current_time = time.time()
-                if self._last_telemetry_time > 0:
-                    delta_time = current_time - self._last_telemetry_time
-                    if 0 < delta_time < 1.0:
-                        fps = 1.0 / delta_time
-                        self.telemetry_fps = self.telemetry_fps * 0.9 + fps * 0.1
-                self._last_telemetry_time = current_time
-                
-                # Вызов callbacks
-                for callback in self._telemetry_callbacks:
-                    try:
-                        callback(self.telemetry)
-                    except Exception as e:
-                        print(f"Ошибка в callback телеметрии: {e}")
+        # NOTE: В C# коде payload парсится исходя из frame[1], frame[2]... где frame[0] это Type.
         
-        # Каналы
-        elif frame_type == self.CRSF_FRAMETYPE_RC_CHANNELS:
-            pass  # Можно добавить обработку при необходимости
-    
-    def _check_frame_crc8(self, frame: bytes, length: int) -> bool:
-        """Проверка CRC8 пакета"""
+        updated_event = None
+
+        try:
+            if frame_type == self.FRAME_ATTITUDE:
+                # Payload: Pitch(2), Roll(2), Yaw(2) BigEndian
+                if len(payload) >= 6:
+                    p = int.from_bytes(payload[0:2], 'big', signed=True)
+                    r = int.from_bytes(payload[2:4], 'big', signed=True)
+                    y = int.from_bytes(payload[4:6], 'big', signed=True)
+                    
+                    self.telemetry.angles.pitch = float(p) * 360.0 / 65536.0
+                    self.telemetry.angles.roll = float(r) * 360.0 / 65536.0
+                    self.telemetry.angles.yaw = float(y) * 360.0 / 65536.0
+                    updated_event = 'angles'
+
+            elif frame_type == self.FRAME_FLIGHT_MODE:
+                # Null terminated string or full length
+                mode_str = payload.decode('ascii', errors='ignore').split('\x00')[0]
+                self.telemetry.flight_mode.mode = mode_str
+                updated_event = 'flight_mode'
+
+            elif frame_type == self.FRAME_GPS:
+                # Lat(4), Lon(4), Spd(2), Hdg(2), Alt(2), Sats(1)
+                if len(payload) >= 15:
+                    lat = int.from_bytes(payload[0:4], 'big', signed=True)
+                    lon = int.from_bytes(payload[4:8], 'big', signed=True)
+                    spd = int.from_bytes(payload[8:10], 'big', signed=False)
+                    hdg = int.from_bytes(payload[10:12], 'big', signed=False)
+                    alt = int.from_bytes(payload[12:14], 'big', signed=False) # + offset -1000 in C#
+                    sats = payload[14]
+
+                    self.telemetry.gps.latitude = lat / 10000000.0
+                    self.telemetry.gps.longitude = lon / 10000000.0
+                    self.telemetry.gps.ground_speed = spd / 10.0
+                    self.telemetry.gps.ground_course = hdg / 100.0
+                    self.telemetry.gps.altitude = float(alt) - 1000.0
+                    self.telemetry.gps.satellites = sats
+                    updated_event = 'gps'
+
+            elif frame_type == self.FRAME_VSPEED:
+                if len(payload) >= 2:
+                    vspd = int.from_bytes(payload[0:2], 'big', signed=True)
+                    self.telemetry.v_speed.vertical_speed = vspd / 100.0
+                    updated_event = 'vspeed'
+
+            elif frame_type == self.FRAME_BATTERY:
+                # Volt(2), Curr(2), Cap(3), Rem(1)
+                if len(payload) >= 8:
+                    volt = int.from_bytes(payload[0:2], 'big', signed=True)
+                    curr = int.from_bytes(payload[2:4], 'big', signed=True)
+                    cap = int.from_bytes(payload[4:7], 'big', signed=False)
+                    rem = payload[7]
+
+                    self.telemetry.battery.voltage = volt / 10.0
+                    self.telemetry.battery.current = curr / 10.0
+                    self.telemetry.battery.capacity_mah = cap
+                    self.telemetry.battery.remaining_percent = rem
+                    updated_event = 'battery'
+
+            if updated_event:
+                self._trigger_event(updated_event)
+
+        except Exception as e:
+            print(f"Ошибка парсинга пакета 0x{frame_type:02X}: {e}")
+
+    def _check_crc(self, frame: bytearray, length: int) -> bool:
+        # CRC считается от начала (Type) до (Length-1)
+        # frame[length-1] это полученный CRC
         crc_received = frame[length - 1]
         crc_calculated = self.crc_calculator.checksum(frame, 0, length - 1)
         return crc_received == crc_calculated
-    
-    def _send_crsf_channels(self):
-        """Отправка каналов в формате CRSF"""
-        with self.channel_lock:
-            packet = self._create_crsf_channels_packet(self.channels)
+
+    # --- Loops ---
+
+    def _send_loop(self):
+        packet_buffer = bytearray(64) # переиспользуемый буфер? лучше создавать новый
         
-        self.serial_port.write(packet)
-        self.data_sent += 1
-    
-    def _create_crsf_channels_packet(self, channels: list) -> bytes:
-        """Создание пакета с каналами"""
-        if len(channels) < 16:
-            raise ValueError("Ожидается 16 каналов")
-        
-        # Квантование каналов в 11-битные значения
-        ch_vals = []
-        for i in range(16):
-            x = channels[i]
+        while self.is_running:
+            loop_start = time.time()
             
-            # Клипуем в [-1..1]
-            x = max(-1.0, min(1.0, x))
+            try:
+                if self.serial_port and self.serial_port.is_open:
+                    packet = self._create_channels_packet()
+                    self.serial_port.write(packet)
+                    self.stats_packets_sent += 1
+            except Exception as e:
+                print(f"Ошибка отправки: {e}")
             
-            # Линейное преобразование [-1..1] → [172..1811]
-            t = (x + 1.0) * 0.5  # 0..1
-            v = int(round(self.CRSF_MIN + t * (self.CRSF_MAX - self.CRSF_MIN)))
-            v = max(self.CRSF_MIN, min(self.CRSF_MAX, v))
-            
-            ch_vals.append(v & 0x7FF)  # 11 бит
-        
-        # Пакуем 16*11 бит в 22 байта (LSB-first)
+            # Control rate
+            elapsed = time.time() - loop_start
+            delay = (1.0 / self.send_rate) - elapsed
+            if delay > 0:
+                time.sleep(delay)
+
+    def _create_channels_packet(self) -> bytes:
+        # 1. Подготовка 11-битных значений
+        ch_vals = [0] * 16
+        with self._channel_lock:
+            for i in range(16):
+                x = self.channels[i]
+                # Map -1..1 to CRSF_MIN..CRSF_MAX
+                t = (x + 1.0) * 0.5
+                val = int(self.CRSF_MIN + t * (self.CRSF_MAX - self.CRSF_MIN))
+                val = max(self.CRSF_MIN, min(self.CRSF_MAX, val))
+                ch_vals[i] = val & 0x7FF
+
+        # 2. Упаковка битов (LSB First)
         payload = bytearray(22)
         bit_pos = 0
-        
         for ch in range(16):
             val = ch_vals[ch]
             for b in range(11):
-                byte_index = bit_pos >> 3
-                bit_index = bit_pos & 7
+                byte_idx = bit_pos >> 3
+                bit_idx = bit_pos & 7
                 bit = (val >> b) & 1
                 if bit:
-                    payload[byte_index] |= (1 << bit_index)
+                    payload[byte_idx] |= (1 << bit_idx)
                 bit_pos += 1
         
-        # Собираем пакет: [Addr][Len][Type][Payload][CRC]
-        length = 1 + 22 + 1  # Type + Payload + CRC
+        # 3. Сборка пакета [Sync][Len][Type][Payload...][CRC]
+        # Length = Type(1) + Payload(22) + CRC(1) = 24
+        length = 24
         packet = bytearray()
-        packet.append(self.CRSF_ADDR_MODULE)
+        packet.append(self.CRSF_SYNC_BYTE)
         packet.append(length)
-        packet.append(self.CRSF_FRAMETYPE_RC_CHANNELS)
+        packet.append(self.FRAME_RC_CHANNELS)
         packet.extend(payload)
         
-        # CRC считается по [Type][Payload]
-        crc = self.crc_calculator.checksum(packet, 2, 1 + 22)
-        packet.append(crc)
+        # CRC считается по [Type] + [Payload]
+        # Срез packet[2:] берет Type и всё что добавили дальше
+        crc_val = self.crc_calculator.checksum(packet, 2)
+        packet.append(crc_val)
         
         return bytes(packet)
-    
-    def __del__(self):
-        """Деструктор"""
-        self.disconnect()
+
+    def _receive_loop(self):
+        """ Читаем поток байт, ищем синхронизацию 0xC8 и разбираем пакеты. """
+        while self.is_running:
+            try:
+                if self.serial_port and self.serial_port.is_open:
+                    # Ждем хотя бы 2 байта (Sync + Len)
+                    if self.serial_port.in_waiting >= 2:
+                        sync = self.serial_port.read(1)[0]
+                        if sync != self.CRSF_SYNC_BYTE:
+                            continue
+                        
+                        length = self.serial_port.read(1)[0]
+                        if length <= 0 or length > 64: # Sanity check
+                            continue
+                        
+                        # Ждем остаток пакета
+                        # Можно добавить таймаут, чтобы не зависнуть навечно
+                        start_wait = time.time()
+                        while self.serial_port.in_waiting < length:
+                            if time.time() - start_wait > 0.1:
+                                break
+                            time.sleep(0.001)
+                        
+                        if self.serial_port.in_waiting < length:
+                            continue # Не дождались
+
+                        # Читаем тело [Type... Payload... CRC]
+                        frame_body = self.serial_port.read(length)
+                        self.stats_bytes_received += (2 + length)
+                        
+                        # Обрабатываем. frame_body содержит Type в [0] и CRC в конце
+                        self._process_frame(bytearray(frame_body), length)
+                    else:
+                        time.sleep(0.002)
+                else:
+                    time.sleep(0.1)
+            except Exception as e:
+                if self.is_running:
+                    print(f"Ошибка приема: {e}")
+                    time.sleep(1)

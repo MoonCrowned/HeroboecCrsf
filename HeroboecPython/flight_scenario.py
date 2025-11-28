@@ -243,7 +243,7 @@ def main():
     controller = CrsfController()
     
     # Подписка на телеметрию
-    controller.add_telemetry_callback(on_telemetry)
+    controller.subscribe('all', on_telemetry)
     
     # Создание сценария
     scenario = FlightScenario(controller)

@@ -3376,7 +3376,7 @@ MonoBehaviour:
   - {fileID: 775308449}
   - {fileID: 559302535}
   m_TelemetryText: {fileID: 2108030598}
-  m_CRSFport: COM5
+  m_CRSFport: COM7
   m_CRSFbaud: 420000
   m_CRSFSendRate: 20
   m_CrsfController: {fileID: 624826380}

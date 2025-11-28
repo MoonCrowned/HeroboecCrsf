@@ -11,7 +11,7 @@ def main():
     controller = CrsfController()
     
     # Подписка на телеметрию
-    controller.add_telemetry_callback(on_telemetry_received)
+    controller.subscribe('all', on_telemetry_received)
     
     # Подключение к COM порту
     try:
