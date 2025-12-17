@@ -12,7 +12,9 @@ public class CrsfMoonController : MonoBehaviour
     public event Action<CrsfTelemetryData> TelemetryGpsDataReceived;
     public event Action<CrsfTelemetryData> TelemetryFlightModeDataReceived;
     public event Action<CrsfTelemetryData> TelemetryVSpeedDataReceived;
+    public event Action<CrsfTelemetryData> TelemetryBaroAltitudeDataReceived;
     public event Action<CrsfTelemetryData> TelemetryBatteryDataReceived;
+    public event Action<CrsfTelemetryData> TelemetryQuaternionDataReceived;
 
     // Публичные данные телеметрии
     public CrsfTelemetryData CrsfTelemetry { get; private set; } = new CrsfTelemetryData();
@@ -46,7 +48,9 @@ public class CrsfMoonController : MonoBehaviour
     private bool mGpsUpdatedFlag = false;
     private bool mFlightModeUpdatedFlag = false;
     private bool mVSpeedUpdatedFlag = false;
+    private bool mBaroAltitudeUpdatedFlag = false;
     private bool mBatteryUpdatedFlag = false;
+    private bool mQuaternionUpdatedFlag = false;
 
     private CRC8Calc mCrc8Calculator = new CRC8Calc(0xD5);
     private long mLastReceivedTelemetryTime = 0;
@@ -312,7 +316,7 @@ public class CrsfMoonController : MonoBehaviour
             return;
         }
 
-        //Debug.Log("Type = " + frame[0].ToString("X2") + " len=" + length);
+        Debug.Log("Type = " + frame[0].ToString("X2") + " len=" + length);
 
         // Углы пришли
         if (frame[0] == 0x1E)
@@ -413,6 +417,42 @@ public class CrsfMoonController : MonoBehaviour
                 mLastReceivedTelemetryTime = time;
             }
         }
+        // Barometric Altitude + Vertical Speed
+        else if (frame[0] == 0x09)
+        {
+            if (length >= 4)
+            {
+                int altRaw = (frame[1] << 8) | frame[2];
+                float altitudeMeters;
+
+                if ((altRaw & 0x8000) == 0)
+                {
+                    altitudeMeters = (altRaw - 10000) / 10.0f;
+                }
+                else
+                {
+                    altitudeMeters = (altRaw & 0x7FFF);
+                }
+
+                CrsfTelemetry.BaroAltitude.AltitudeMeters = altitudeMeters;
+
+                if (length >= 6)
+                {
+                    int vsRaw = (short)((frame[3] << 8) | frame[4]);
+                    CrsfTelemetry.BaroAltitude.VerticalSpeedMps = vsRaw / 100.0f;
+                }
+
+                mTelemetryUpdatedFlag = true;
+                mBaroAltitudeUpdatedFlag = true;
+
+                var time = DateTime.Now.Ticks;
+                var deltaTimeTicks = time - mLastReceivedTelemetryTime;
+                var deltaTime = (float)(deltaTimeTicks / 10000000.0);
+                if (deltaTime < 1f && deltaTime > 0f)
+                    mReceiveTelemetryFps = Mathf.Lerp(mReceiveTelemetryFps, 1f / deltaTime, 0.1f);
+                mLastReceivedTelemetryTime = time;
+            }
+        }
         // Battery Voltage and Current
         else if (frame[0] == 0x08)
         {
@@ -429,6 +469,41 @@ public class CrsfMoonController : MonoBehaviour
                 CrsfTelemetry.Battery.RemainingPercent = percent;
                 mTelemetryUpdatedFlag = true;
                 mBatteryUpdatedFlag = true;
+
+                var time = DateTime.Now.Ticks;
+                var deltaTimeTicks = time - mLastReceivedTelemetryTime;
+                var deltaTime = (float)(deltaTimeTicks / 10000000.0);
+                if (deltaTime < 1f && deltaTime > 0f)
+                    mReceiveTelemetryFps = Mathf.Lerp(mReceiveTelemetryFps, 1f / deltaTime, 0.1f);
+                mLastReceivedTelemetryTime = time;
+            }
+        }
+        // Quaternion Rotation
+        else if (frame[0] == 0x41)
+        {
+            if (length >= 10)
+            {
+                ushort rx = (ushort)((frame[1] << 8) | frame[2]);
+                ushort ry = (ushort)((frame[3] << 8) | frame[4]);
+                ushort rz = (ushort)((frame[5] << 8) | frame[6]);
+                ushort rw = (ushort)((frame[7] << 8) | frame[8]);
+
+                float x = Mathf.Clamp((rx - 32768f) / 32700f, -1f, 1f);
+                float y = Mathf.Clamp((ry - 32768f) / 32700f, -1f, 1f);
+                float z = Mathf.Clamp((rz - 32768f) / 32700f, -1f, 1f);
+                float w = Mathf.Clamp((rw - 32768f) / 32700f, -1f, 1f);
+
+                CrsfTelemetry.QuaternionData.X = x;
+                CrsfTelemetry.QuaternionData.Y = y;
+                CrsfTelemetry.QuaternionData.Z = z;
+                CrsfTelemetry.QuaternionData.W = w;
+
+                var q = new Quaternion(x, y, z, w);
+                float qSqrMag = x * x + y * y + z * z + w * w;
+                CrsfTelemetry.QuaternionData.Rotation = qSqrMag > 1e-12f ? q.normalized : Quaternion.identity;
+
+                mTelemetryUpdatedFlag = true;
+                mQuaternionUpdatedFlag = true;
 
                 var time = DateTime.Now.Ticks;
                 var deltaTimeTicks = time - mLastReceivedTelemetryTime;
@@ -555,11 +630,23 @@ public class CrsfMoonController : MonoBehaviour
             TelemetryVSpeedDataReceived?.Invoke(CrsfTelemetry);
             mVSpeedUpdatedFlag = false;
         }
+        if (mBaroAltitudeUpdatedFlag)
+        {
+            CrsfTelemetry.BaroAltitude.lastPacketReceivedTime = Time.time;
+            TelemetryBaroAltitudeDataReceived?.Invoke(CrsfTelemetry);
+            mBaroAltitudeUpdatedFlag = false;
+        }
         if (mBatteryUpdatedFlag)
         {
             CrsfTelemetry.Battery.lastPacketReceivedTime = Time.time;
             TelemetryBatteryDataReceived?.Invoke(CrsfTelemetry);
             mBatteryUpdatedFlag = false;
+        }
+        if (mQuaternionUpdatedFlag)
+        {
+            CrsfTelemetry.QuaternionData.lastPacketReceivedTime = Time.time;
+            TelemetryQuaternionDataReceived?.Invoke(CrsfTelemetry);
+            mQuaternionUpdatedFlag = false;
         }
     }
 }
@@ -574,6 +661,8 @@ public class CrsfTelemetryData
     public CrsfFcFlightModeData FlightMode { get; set; } = new CrsfFcFlightModeData();
     public CrsfFcVSpeedData VSpeed { get; set; } = new CrsfFcVSpeedData();
     public CrsfFcBatteryData Battery { get; set; } = new CrsfFcBatteryData();
+    public CrsfFcBaroAltitudeData BaroAltitude { get; set; } = new CrsfFcBaroAltitudeData();
+    public CrsfQuaternionData QuaternionData { get; set; } = new CrsfQuaternionData();
 
     // public float Pitch { get { return Angles != null ? Angles.Pitch : 0f; } set { if (Angles == null) Angles = new CrsfFcAnglesData(); Angles.Pitch = value; } }
     // public float Roll { get { return Angles != null ? Angles.Roll : 0f; } set { if (Angles == null) Angles = new CrsfFcAnglesData(); Angles.Roll = value; } }
@@ -582,7 +671,22 @@ public class CrsfTelemetryData
     public override string ToString()
     {
         //return $"Pitch={Pitch:F1}° Yaw={Yaw:F1}° Roll={Roll:F1}°";
-        return $"{Angles}\n{Gps}\n{FlightMode}\n{VSpeed}\n{Battery}";
+        return $"{Angles}\n{Gps}\n{FlightMode}\n{VSpeed}\n{Battery}\n{BaroAltitude}\n{QuaternionData}";
+    }
+}
+
+public class CrsfQuaternionData
+{
+    public float lastPacketReceivedTime;
+    public float X;
+    public float Y;
+    public float Z;
+    public float W;
+    public Quaternion Rotation;
+
+    public override string ToString()
+    {
+        return $"Quaternion = (x={X:F3} y={Y:F3} z={Z:F3} w={W:F3})";
     }
 }
 
@@ -631,6 +735,17 @@ public class CrsfFcVSpeedData
     public override string ToString()
     {
         return $"VSpeed = {VerticalSpeedMps:F2}m/s";
+    }
+}
+
+public class CrsfFcBaroAltitudeData
+{
+    public float lastPacketReceivedTime;
+    public float AltitudeMeters;
+    public float VerticalSpeedMps;
+    public override string ToString()
+    {
+        return $"BaroAltitude = (Alt={AltitudeMeters:F1}m VSpeed={VerticalSpeedMps:F2}m/s)";
     }
 }
 

@@ -3,7 +3,9 @@ import threading
 import time
 import struct
 from dataclasses import dataclass, field
-from typing import List, Callable, Optional, Dict, Any
+from typing import List, Callable, Optional, Dict, Any, Tuple
+
+from TransformMath import ConvertQuaternionByBasis, Quaternion, Transform
 
 # --- Data Classes (Structures) ---
 
@@ -34,6 +36,30 @@ class CrsfVSpeedData:
     vertical_speed: float = 0.0 # m/s
 
 @dataclass
+class CrsfBaroAltitudeData:
+    altitude_meters: float = 0.0
+    vertical_speed_mps: float = 0.0
+
+@dataclass
+class CrsfQuaternionData:
+    x: float = 0.0
+    y: float = 0.0
+    z: float = 0.0
+    w: float = 1.0
+    rotation: Tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0)
+    unity_transform: Transform = field(default_factory=Transform)
+
+    @staticmethod
+    def telemetry_quat_to_unity(q: Quaternion) -> Quaternion:
+        m = (
+            (0.0, 1.0, 0.0),
+            (0.0, 0.0, -1.0),
+            (-1.0, 0.0, 0.0),
+        )
+        inverse_rotation = False
+        return ConvertQuaternionByBasis(q, m, inverse_rotation=inverse_rotation)
+
+@dataclass
 class CrsfFlightModeData:
     mode: str = ""
 
@@ -43,6 +69,8 @@ class CrsfTelemetryData:
     gps: CrsfGpsData = field(default_factory=CrsfGpsData)
     battery: CrsfBatteryData = field(default_factory=CrsfBatteryData)
     v_speed: CrsfVSpeedData = field(default_factory=CrsfVSpeedData)
+    baro_altitude: CrsfBaroAltitudeData = field(default_factory=CrsfBaroAltitudeData)
+    quaternion: CrsfQuaternionData = field(default_factory=CrsfQuaternionData)
     flight_mode: CrsfFlightModeData = field(default_factory=CrsfFlightModeData)
 
     def __str__(self):
@@ -87,9 +115,11 @@ class CrsfController:
     FRAME_GPS = 0x02
     FRAME_VSPEED = 0x07
     FRAME_BATTERY = 0x08
+    FRAME_BARO_ALTITUDE = 0x09
     FRAME_RC_CHANNELS = 0x16
     FRAME_ATTITUDE = 0x1E
     FRAME_FLIGHT_MODE = 0x21
+    FRAME_QUATERNION = 0x41
 
     # Scaling
     CRSF_MIN = 172
@@ -118,6 +148,8 @@ class CrsfController:
             'gps': [],
             'battery': [],
             'vspeed': [],
+            'baro_altitude': [],
+            'quaternion': [],
             'flight_mode': []
         }
 
@@ -236,6 +268,8 @@ class CrsfController:
         
         updated_event = None
 
+        #print(f"Frame Type: {frame_type:02X}")
+
         try:
             if frame_type == self.FRAME_ATTITUDE:
                 # Payload: Pitch(2), Roll(2), Yaw(2) BigEndian
@@ -278,6 +312,59 @@ class CrsfController:
                     vspd = int.from_bytes(payload[0:2], 'big', signed=True)
                     self.telemetry.v_speed.vertical_speed = vspd / 100.0
                     updated_event = 'vspeed'
+
+            elif frame_type == self.FRAME_BARO_ALTITUDE:
+                if len(payload) >= 2:
+                    alt_raw = int.from_bytes(payload[0:2], 'big', signed=False)
+                    if (alt_raw & 0x8000) == 0:
+                        altitude_meters = (alt_raw - 10000) / 10.0
+                    else:
+                        altitude_meters = float(alt_raw & 0x7FFF)
+                    self.telemetry.baro_altitude.altitude_meters = altitude_meters
+
+                    if len(payload) >= 4:
+                        vs_raw = int.from_bytes(payload[2:4], 'big', signed=True)
+                        self.telemetry.baro_altitude.vertical_speed_mps = vs_raw / 100.0
+
+                    updated_event = 'baro_altitude'
+
+            elif frame_type == self.FRAME_QUATERNION:
+                if len(payload) >= 8:
+                    # Quaternion component order in many telemetry streams is (w, x, y, z).
+                    # Interpreting it as (x, y, z, w) makes identity look like x≈1, w≈0.
+                    rw = int.from_bytes(payload[0:2], 'big', signed=False)
+                    rx = int.from_bytes(payload[2:4], 'big', signed=False)
+                    ry = int.from_bytes(payload[4:6], 'big', signed=False)
+                    rz = int.from_bytes(payload[6:8], 'big', signed=False)
+
+                    w = max(-1.0, min(1.0, (rw - 32768.0) / 32700.0))
+                    x = max(-1.0, min(1.0, (rx - 32768.0) / 32700.0))
+                    y = max(-1.0, min(1.0, (ry - 32768.0) / 32700.0))
+                    z = max(-1.0, min(1.0, (rz - 32768.0) / 32700.0))
+
+                    self.telemetry.quaternion.x = x
+                    self.telemetry.quaternion.y = y
+                    self.telemetry.quaternion.z = z
+                    self.telemetry.quaternion.w = w
+
+                    sqr_mag = x * x + y * y + z * z + w * w
+                    if sqr_mag > 1e-12:
+                        inv_mag = 1.0 / (sqr_mag ** 0.5)
+                        self.telemetry.quaternion.rotation = (
+                            x * inv_mag,
+                            y * inv_mag,
+                            z * inv_mag,
+                            w * inv_mag,
+                        )
+                    else:
+                        self.telemetry.quaternion.rotation = (0.0, 0.0, 0.0, 1.0)
+
+                    qx, qy, qz, qw = self.telemetry.quaternion.rotation
+                    q_tel = Quaternion(qx, qy, qz, qw)
+                    q_unity = CrsfQuaternionData.telemetry_quat_to_unity(q_tel)
+                    self.telemetry.quaternion.unity_transform.rotation = q_unity
+
+                    updated_event = 'quaternion'
 
             elif frame_type == self.FRAME_BATTERY:
                 # Volt(2), Curr(2), Cap(3), Rem(1)

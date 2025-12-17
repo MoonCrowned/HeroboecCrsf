@@ -1,0 +1,52 @@
+{
+  "port": "/dev/ttyUSB0",
+  "trigger_hold_time": 2.0,
+
+  "to_half_throttle_time": 3.0,
+  "half_throttle": -0.4,
+  "half_to_max_throttle_delay": 2.0,
+  "to_max_throttle_time": 1.0,
+  "max_throttle": 1.0,
+  "liftoff_time": 1.0,
+  "pitch_from": -0.5,
+  "to_angle_delay": 2.0,
+
+  "azimuth_kp": 0.02,
+  "yaw_control_min": -0.9,
+  "yaw_control_max": 0.9,
+  "roll_control_min": -0.7,
+  "roll_control_max": 0.7,
+  "roll_control_factor": 3.0,
+  "pitch_turn_min": -0.2,
+  "pitch_turn_max": 0.2,
+
+  "height_kp": 0.02,
+  "pitch_height_min": -0.4,
+  "pitch_height_max": 0.4,
+
+  "change_azimuth_speed": 10,
+
+  "program_azimuth1": 15.0,
+  "program_height1": 100.0,
+  "program_1_2_pause": 3.0,
+
+  "program_azimuth2": 30.0,
+  "program_height2": 100.0,
+  "program_2_3_pause": 3.0,
+
+  "program_azimuth3": 0.0,
+  "program_height3": 100.0,
+  "program_3_4_pause": 3.0,
+
+  "min_sats_for_gps": 4,
+
+  "channel_roll": 0,
+  "channel_pitch": 1,
+  "channel_throttle": 3,
+  "channel_yaw": 2,
+  "channel_arm": 7,
+  "channel_mode": 5,
+
+  "mode_acro_value": 0.0,
+  "mode_angle_value": 1.0
+}

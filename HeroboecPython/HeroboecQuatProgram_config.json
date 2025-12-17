@@ -1,0 +1,84 @@
+{
+  "port": "COM10",
+  "port_temp": "/dev/ttyUSB0",
+  "trigger_hold_time": 2.0,
+
+  "channel_roll": 0,
+  "channel_pitch": 1,
+  "channel_yaw": 3,
+  "channel_throttle": 2,
+  "channel_arm": 7,
+  "channel_mode": 5,
+
+  "arm_value": 1.0,
+  "disarm_value": 0.0,
+
+  "mode_acro_value": 0.0,
+
+  "spool_to_half_time": 3.0,
+  "half_throttle": 0.0,
+  "spool_hold_time": 2.0,
+  "to_takeoff_throttle_time": 1.0,
+  "takeoff_throttle": 1.0,
+
+  "vertical_takeoff_time": 20.0,
+
+  "attitude_kp_pitch": 2.0,
+  "attitude_kp_yaw": 2.0,
+  "attitude_kp_roll": 0.5,
+
+  "axis_invert_pitch": 0,
+  "axis_invert_yaw": 0,
+  "axis_invert_roll": 1,
+
+  "max_cmd_pitch": 1.0,
+  "max_cmd_yaw": 1.0,
+  "max_cmd_roll": 1.0,
+
+  "program_azimuth1": 0.0,
+  "program_height1": 100.0,
+  "program_time1": 20.0,
+
+  "program_azimuth2": 120.0,
+  "program_height2": 100.0,
+  "program_time2": 20.0,
+
+  "program_azimuth3": 240.0,
+  "program_height3": 100.0,
+  "program_time3": 20.0,
+
+  "change_azimuth_speed_deg_s": 20.0,
+  "change_height_speed_m_s": 6.0,
+
+  "cruise_throttle": -0.1,
+
+  "alt_kp": 0.8,
+  "alt_ki": 0.05,
+  "alt_kd_vspeed": 0.4,
+  "alt_integral_limit": 80.0,
+
+  "pitch_bias_deg": 8.0,
+  "pitch_limit_deg": 25.0,
+
+  "landing_start_after_program": 1,
+
+  "landing_vspeed_high_mps": -4.0,
+  "landing_vspeed_mid_mps": -2.0,
+  "landing_vspeed_low_mps": -1.0,
+
+  "landing_alt_mid_m": 40.0,
+  "landing_alt_low_m": 20.0,
+
+  "landing_throttle_hover": 0.1,
+  "landing_throttle_kp": 0.35,
+  "landing_throttle_min": -1.0,
+  "landing_throttle_max": 0.6,
+
+  "touchdown_enable_below_m": 40.0,
+  "touchdown_prev_vspeed_below": -0.6,
+  "touchdown_vspeed_above": -0.1,
+  "touchdown_max_tilt_deg": 35.0,
+  "touchdown_alt_below_m": 15.0,
+
+  "control_rate_hz": 50
+}
